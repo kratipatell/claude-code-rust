@@ -23,6 +23,15 @@ fn execute_tool(name: &str, arguments: &str) -> String {
                 .unwrap_or_else(|e| format!("Error reading {path}: {e}")),
             None => "Error: missing file_path".to_string(),
         },
+
+        "Write" => match (args["file_path"].as_str(), args["content"].as_str()) {
+            (Some(path), Some(content)) => match std::fs::write(path, content) {
+                Ok(_) => "File written successfully".to_string(),
+                Err(e) => format!("Error writing {path}: {e}"),
+            },
+            _ => "Error: missing file_path or content".to_string(),
+        },
+
         _ => format!("Error: unknown tool {name}"),
     }
 }
@@ -64,13 +73,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "required": ["file_path"]
                             }
                         }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "Write",
+                            "description": "Write content to a file",
+                            "parameters": {
+                            "type": "object",
+                            "required": ["file_path", "content"],
+                            "properties": {
+                                "file_path": {
+                                "type": "string",
+                                "description": "The path of the file to write to"
+                                },
+                                "content": {
+                                "type": "string",
+                                "description": "The content to write to the file"
+                                }
+                            }
+                        }
                     }
-                ]
+                }
+             ]
         );
 
- let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": args.prompt })];
+    let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": args.prompt })];
 
- loop {
+    loop {
         let response: Value = client
             .chat()
             .create_byot(json!({
@@ -91,9 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for tool_call in tool_calls {
                     let id = tool_call["id"].as_str().unwrap_or_default();
                     let name = tool_call["function"]["name"].as_str().unwrap_or_default();
-                    let arguments = tool_call["function"]["arguments"]
-                        .as_str()
-                        .unwrap_or("{}");
+                    let arguments = tool_call["function"]["arguments"].as_str().unwrap_or("{}");
 
                     let result = execute_tool(name, arguments);
 
