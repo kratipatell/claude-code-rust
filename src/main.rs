@@ -1,8 +1,8 @@
 use async_openai::{Client, config::OpenAIConfig};
 use clap::Parser;
+use dotenv;
 use serde_json::{Value, json};
 use std::{env, process};
-use dotenv;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -11,6 +11,21 @@ struct Args {
     prompt: String,
 }
 
+fn execute_tool(name: &str, arguments: &str) -> String {
+    let args: Value = match serde_json::from_str(arguments) {
+        Ok(v) => v,
+        Err(e) => return format!("Error: invalid tool arguments: {e}"),
+    };
+
+    match name {
+        "Read" => match args["file_path"].as_str() {
+            Some(path) => std::fs::read_to_string(path)
+                .unwrap_or_else(|e| format!("Error reading {path}: {e}")),
+            None => "Error: missing file_path".to_string(),
+        },
+        _ => format!("Error: unknown tool {name}"),
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,55 +46,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::with_config(config);
 
-    #[allow(unused_variables)]
-    let response: Value = client
-        .chat()
-        .create_byot(json!({
-            "messages": [
-                {
-                    "role": "user",
-                    "content": args.prompt
-                }
-            ],
-            "model": "anthropic/claude-haiku-4.5",
-            "max_tokens":4000,
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "Read",
-                        "description": "Read and return the contents of a file",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "file_path": {
-                                    "type": "string",
-                                    "description": "The path to the file to read"
-                                }
-                            },
-                            "required": ["file_path"]
+    let tools = json!(
+    [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "Read",
+                            "description": "Read and return the contents of a file",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "file_path": {
+                                        "type": "string",
+                                        "description": "The path to the file to read"
+                                    }
+                                },
+                                "required": ["file_path"]
+                            }
                         }
                     }
+                ]
+        );
+
+ let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": args.prompt })];
+
+ loop {
+        let response: Value = client
+            .chat()
+            .create_byot(json!({
+                "messages": messages,
+                "model": "anthropic/claude-haiku-4.5",
+                "max_tokens": 4000,
+                "tools": tools
+            }))
+            .await?;
+
+        // append response message to messages
+        let message = response["choices"][0]["message"].clone();
+        messages.push(message.clone());
+
+        match message["tool_calls"].as_array() {
+            Some(tool_calls) if !tool_calls.is_empty() => {
+                // for each tool_call: execute and append the result
+                for tool_call in tool_calls {
+                    let id = tool_call["id"].as_str().unwrap_or_default();
+                    let name = tool_call["function"]["name"].as_str().unwrap_or_default();
+                    let arguments = tool_call["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("{}");
+
+                    let result = execute_tool(name, arguments);
+
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": result
+                    }));
                 }
-            ]
-        }))
-        .await?;
-
-    let message = &response["choices"][0]["message"];
-
-    if let Some(tool_calls) = message["tool_calls"].as_array() {
-        let tool_call = &tool_calls[0];
-        let name = tool_call["function"]["name"].as_str().unwrap();
-        let arguments: Value =
-            serde_json::from_str(tool_call["function"]["arguments"].as_str().unwrap())?;
-
-        if name == "Read" {
-            let file_path = arguments["file_path"].as_str().unwrap();
-            let contents = std::fs::read_to_string(file_path)?;
-            print!("{}", contents);
+            }
+            _ => {
+                // no tool_calls: print content and exit
+                println!("{}", message["content"].as_str().unwrap_or(""));
+                break;
+            }
         }
-    } else if let Some(content) = message["content"].as_str() {
-        println!("{}", content);
     }
 
     Ok(())
